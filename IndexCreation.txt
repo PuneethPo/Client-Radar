@@ -1,0 +1,378 @@
+#Installing Azure AI Search Library to work with SDK
+
+# %pip install azure-search-documents
+# dbutils.library.restartPython()
+
+%md
+### Importing Required Libraries
+
+from typing import List  
+import re  
+from datetime import datetime  
+from azure.storage.blob import BlobServiceClient  
+from azure.identity import DefaultAzureCredential
+from azure.search.documents import SearchClient
+from azure.search.documents.indexes import SearchIndexClient,SearchIndexerClient
+from azure.search.documents.indexes.models import (
+    SearchIndexerDataContainer,
+    SearchIndex,
+    SearchIndexer,
+    SearchableField,
+    SimpleField,
+    ComplexField,
+    SearchFieldDataType,
+    EntityRecognitionSkill,
+    InputFieldMappingEntry,
+    OutputFieldMappingEntry,
+    SearchIndexerSkillset,
+    CorsOptions,
+    IndexingSchedule,
+    SearchableField,
+    IndexingParameters,
+    SearchIndexerDataSourceConnection,
+    IndexingParametersConfiguration,
+    ScoringProfile,
+    CorsOptions,
+    SemanticConfiguration,
+    SemanticPrioritizedFields,
+    SemanticField,
+    SemanticSearch
+)
+
+# Defining the AI Search Endpoint
+
+search_service_endpoint = "https://experiment.search.windows.net"  
+
+# Create Empty Search Index Function
+
+from azure.core.credentials import AzureKeyCredential  
+from azure.search.documents.indexes.models import SimpleField, SearchFieldDataType, SearchIndex, CorsOptions  
+from azure.search.documents.indexes import SearchIndexClient  
+from typing import List  
+    
+def create_index(name: str):  
+    # Initialize the SearchIndexClient with endpoint and key  
+    client = SearchIndexClient(  
+        endpoint=search_service_endpoint,  
+        credential=DefaultAzureCredential()  
+    )  
+  
+    # Define the index fields  
+    fields = [  
+        SimpleField(name="id", type=SearchFieldDataType.String, key=True, retrievable=True, stored=True),  
+        SimpleField(name="reference", type=SearchFieldDataType.String, filterable=True, retrievable=True, stored=True),  
+        SearchableField(name="content", type=SearchFieldDataType.String, retrievable=True, stored=True),  
+        SearchableField(name="client_account", type=SearchFieldDataType.String, filterable=True, retrievable=True, stored=True),  
+        SearchableField(name="client_industry", type=SearchFieldDataType.String, filterable=True, retrievable=True, stored=True),  
+        SearchableField(name="subsidiary_of", type=SearchFieldDataType.String, filterable=True, retrievable=True, stored=True),  
+    ]  
+
+    semantic_config = SemanticConfiguration(
+    name="index-semantic-configuration",.
+    prioritized_fields=SemanticPrioritizedFields(
+        title_field=SemanticField(field_name="client_account"),
+        keywords_fields=[
+            SemanticField(field_name="client_account"),
+            SemanticField(field_name="client_industry"),
+            SemanticField(field_name="subsidiary_of")
+        ],
+        content_fields=[SemanticField(field_name="content")]
+    )
+    )
+
+    semantic_search = SemanticSearch(configurations=[semantic_config])
+  
+    # Define CORS options  
+    cors_options = CorsOptions(allowed_origins=["*"], max_age_in_seconds=60)  
+  
+    # Define the Search Index  
+    index = SearchIndex(  
+        name=name,  
+        fields=fields,  
+        semantic_search=semantic_search,
+        cors_options=cors_options  
+    )  
+  
+    # Create the index using the client  
+    try:  
+        result = client.create_index(index)  
+        print(f"Index '{name}' created successfully.")  
+    except Exception as e:  
+        print(f"Error creating index '{name}': {e}")  
+		
+# Delete Search Index Function
+
+def delete_index(name):
+    client = SearchIndexClient(  
+        endpoint=search_service_endpoint,  
+        credential=DefaultAzureCredential()  
+    )
+    name = name
+    client.delete_index(name)
+    return f"Index '{name}' deleted successfully."
+
+
+# Create Data Source Function
+
+def create_datasource(name, folder_path):
+    ds_client = SearchIndexClient(  
+        endpoint=search_service_endpoint,  
+        credential=DefaultAzureCredential()  
+    )
+    container = SearchIndexerDataContainer(name="indexes", query=folder_path)
+    data_source_connection = SearchIndexerDataSourceConnection(
+        name=name,
+        type="azureblob",
+        connection_string=conn_str,
+        container=container
+    )
+    data_source = ds_client.create_data_source_connection(data_source_connection)
+    return f"Data source '{name}' created successfully."
+	
+# Delete Data Source Function
+
+def delete_datasource(name):
+    ds_client = SearchIndexClient(  
+        endpoint=search_service_endpoint,  
+        credential=DefaultAzureCredential()  
+    )
+    ds_client.delete_data_source_connection(name)
+    return f"Data source '{name}' deleted successfully."
+	
+
+# Create Indexer Function
+
+def create_indexer(name: str, data_source_name: str, index_name: str):  
+    client = SearchIndexerClient(  
+        endpoint=search_service_endpoint,  
+        credential=SearchIndexClient(  
+        endpoint=search_service_endpoint,  
+        credential=DefaultAzureCredential()  
+    )  
+    )  
+  
+    indexing_parameters = IndexingParameters(  
+        configuration={  
+            "parsingMode": "json",  
+            "indexedDocumentFilenameExtensions": ".json"  
+        }  
+    )  
+  
+    indexer = SearchIndexer(  
+        name=name,  
+        data_source_name=data_source_name,  
+        target_index_name=index_name,  
+        parameters=indexing_parameters  
+    )  
+  
+    try:  
+        client.create_indexer(indexer)  
+        print(f"Indexer '{name}' created successfully.")  
+    except Exception as e:  
+        print(f"Error creating indexer '{name}': {e}")  
+		
+
+# Delete Indexer Function
+
+def delete_indexer(name):
+    indexers_client = SearchIndexClient(  
+        endpoint=search_service_endpoint,  
+        credential=DefaultAzureCredential()  
+    )
+    indexers_client.delete_indexer(name)
+    return f"Indexer {name} deleted."
+
+
+# Recreate Index Function
+
+def recreate_index(name: str, data_source_name: str, index_name: str):
+    delete_message = delete_indexer(name)
+    print(delete_message)
+    create_indexer(name, data_source_name, index_name)
+	
+# Index - Table Mapping Definition
+
+index_map = {
+    'draup-tech-stack': {'account_tech_stack'}, 
+    'draup-market-trend': {'signals', 'account_outsourcing', 'executive_leadership_flux', 'account_transcripts'}, 
+    'draup-overview-signals-financials': {'merges_and_acquisitions', 'balance_sheet_annual', 'org_structure', 'account_investments', 'income_statement_annual', 'sec_filing', 'business_intentions', 'cash_flow_annual', 'account_financials', 'signals', 'accounts_competitors', 'international_filings', 'account_locations', 'accounts_about', 'intention_customer_scenario_impact', 'account_priorities'}, 
+    'draup-overview': {'merges_and_acquisitions', 'org_structure', 'business_intentions', 'accounts_competitors', 'account_locations', 'accounts_about', 'intention_customer_scenario_impact', 'account_priorities'}, 
+    'draup-other': {'executive_leadership_flux', 'account_outsourcing', 'intentions_usecase_technology', 'account_transcripts'}, 
+    'draup-signals-and-financials': {'account_investments', 'income_statement_annual', 'sec_filing', 'cash_flow_annual', 'account_financials', 'international_filings', 'signals', 'balance_sheet_annual'}, 
+    'draup-overview-and-other': {'org_structure', 'executive_leadership_flux', 'business_intentions', 'intentions_usecase_technology', 'accounts_competitors', 'account_outsourcing', 'account_locations', 'accounts_about', 'intention_customer_scenario_impact', 'account_transcripts', 'account_priorities'}, 
+    'draup-overview-and-signals': {'merges_and_acquisitions', 'org_structure', 'business_intentions', 'signals', 'accounts_competitors', 'account_locations', 'accounts_about', 'intention_customer_scenario_impact', 'account_priorities'}, 
+    'draup-signals': {'signals'}, 
+    'draup-intentions': {'business_intentions', 'intentions_usecase_technology'}
+}
+
+#Defining Storage Account Connection String
+
+# conn_str = "DefaultEndpointsProtocol=https;AccountName=draupdatalanding;AccountKey=PmD1o92/S5wPskzYGbFMUTDhKOXChWDgfV2jastnAo5d/Nn4h8fTXSZqOHm0HU7baxv4ND5AiLNk+AStATLUFA==;EndpointSuffix=core.windows.net"
+
+scope_name = "data-ingestion-scope"
+conn_str = dbutils.secrets.get(scope=scope_name, key="draupdatalanding-conn-str")
+
+# Listing All the Available Indexes
+
+# from azure.search.documents.indexes import SearchIndexClient
+# from azure.identity import DefaultAzureCredential
+
+# index_client = SearchIndexClient(
+#     endpoint=search_service_endpoint, 
+#     credential=DefaultAzureCredential()
+# )
+
+# indexes = index_client.list_indexes()
+
+# # Print the names of the indexes
+# for index in indexes:
+#     index_name = []
+#     index_name.append(index)
+#     print(index.name)
+
+# Creating all the Indexes
+for index_name in index_map.keys():
+    create_index(index_name)
+	
+# Obtaining the Folder Path from Blob Storage
+
+# Initialize the BlobServiceClient  
+blob_service_client = BlobServiceClient.from_connection_string(conn_str)    
+# Define the container name  
+container_name = 'indexdatasource'  
+# Get the container client  
+container_client = blob_service_client.get_container_client(container_name)  
+# List top-level folders in the container  
+folder_names = set()  # Use a set to avoid duplicates  
+# Getting the Folder Names from Blob
+blob_list = container_client.walk_blobs(delimiter='/')  
+for blob_prefix in blob_list:  
+    # Each blob_prefix corresponds to a "directory"  
+    folder_name = blob_prefix.name.rstrip('/')  
+    folder_names.add(folder_name)  
+# Save the unique top-level folder names to a variable  
+unique_folder_names = sorted(folder_names)  
+# Define a regex pattern to match the "YYYYMMDD" format  
+date_pattern = re.compile(r'^\d{8}$')  
+# Filter out folder names that match the "YYYYMMDD" pattern  
+date_folders = [name for name in unique_folder_names if date_pattern.match(name)]  
+# Convert these names to datetime objects  
+date_objects = [datetime.strptime(date_str, "%Y%m%d") for date_str in date_folders]  
+# Find the most recent date  
+if date_objects:  
+    latest_date = max(date_objects)  
+    folder_path = latest_date.strftime("%Y%m%d")  
+    print(folder_path)  
+else:  
+    print("No date folders found.")  
+	
+	
+
+# Creating the Data Sources
+
+def create_datasources_from_index_map(index_map, folder_path):  
+    ds_client = SearchIndexerClient(  
+        endpoint=search_service_endpoint,  
+        credential=DefaultAzureCredential()  
+    )  
+      
+    unique_values = set()  
+    for value in index_map.values():  
+        unique_values.update(value)  
+      
+    # Create a copy of the unique values set before normalization  
+    unique_values_copy = unique_values.copy()  
+  
+    # Normalize the unique values by replacing underscores with dashes  
+    unique_values_list = []  
+    for value in unique_values:  
+        normalized_value = re.sub(r'[^a-z0-9-]', '-', value.lower())  
+        normalized_value = re.sub(r'-+', '-', normalized_value).strip('-')  
+        normalized_value = normalized_value[:128]  
+        unique_values_list.append(normalized_value)  
+      
+    # Iterate using the original and normalized values  
+    for original_value, normalized_value in zip(unique_values_copy, unique_values_list):  
+        datasource_path = f"{folder_path}/draup.{original_value}"  
+        container = SearchIndexerDataContainer(name="indexes", query=datasource_path)  
+        data_source_connection = SearchIndexerDataSourceConnection(  
+            name=normalized_value,  
+            type="azureblob",  
+            connection_string=conn_str,  
+            container=container  
+        )  
+        data_source = ds_client.create_data_source_connection(data_source_connection)  
+        print(f"Data source '{normalized_value}' created successfully.")  
+		
+
+create_datasources_from_index_map(index_map, folder_path)
+
+# Listing all the Data Sources
+
+# from azure.search.documents.indexes import SearchIndexerClient
+# from azure.identity import DefaultAzureCredential
+
+# # Initialize the SearchIndexerClient
+# indexer_client = SearchIndexerClient(
+#     endpoint=search_service_endpoint, 
+#     credential=DefaultAzureCredential()
+# )
+
+# # List all data sources
+# datasources = indexer_client.get_data_source_connections()
+
+# # Extract the names of the data sources
+# datasource_names = [datasource.name for datasource in datasources]
+
+# # Display the list of data source names
+# print(datasource_names)
+
+# Creating and Triggering all the Indexers
+
+# from azure.identity import DefaultAzureCredential  
+# from azure.search.documents.indexes import SearchIndexerClient, SearchIndexClient  
+# from azure.search.documents.indexes.models import SearchIndexer, IndexingParameters  
+  
+# # # Original index_map dictionary  
+# # index_map = {  
+# #     'draup-tech-stack': {'account_tech_stack'},  
+# #     'draup-market-trend': {'signals', 'account_outsourcing', 'executive_leadership_flux', 'account_transcripts'}  
+# # }  
+  
+# # Creating a copy of the index_map with underscores replaced with hyphens  
+# new_index_map = {k: {v.replace('_', '-') for v in values} for k, values in index_map.items()}  
+  
+# # Function to create an indexer  
+# def create_indexer(name: str, data_source_name: str, index_name: str):  
+#     client = SearchIndexerClient(  
+#         endpoint=search_service_endpoint,  
+#         credential=DefaultAzureCredential()  
+#     )  
+  
+#     indexing_parameters = IndexingParameters(  
+#         configuration={  
+#             "parsingMode": "json",  
+#             "indexedDocumentFilenameExtensions": ".json"  
+#         }  
+#     )  
+  
+#     indexer = SearchIndexer(  
+#         name=name,  
+#         data_source_name=data_source_name,  
+#         target_index_name=index_name,  
+#         parameters=indexing_parameters  
+#     )  
+  
+#     try:  
+#         client.create_indexer(indexer)  
+#         print(f"Indexer '{name}' created successfully.")  
+#     except Exception as e:  
+#         print(f"Error creating indexer '{name}': {e}")  
+  
+# # Iterate over the new_index_map and create indexers  
+# for index_name, data_sources in new_index_map.items():  
+#     for data_source in data_sources:  
+#         indexer_name = f"{index_name}-{data_source}-indexer"  
+#         create_indexer(indexer_name, data_source, index_name)  
+
+
