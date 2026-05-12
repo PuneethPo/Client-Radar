@@ -1,0 +1,243 @@
+%pip install openpyxl
+dbutils.library.restartPython()
+
+import openai, os, requests, time, json
+import pandas as pd
+from pyspark.sql.types import StructType, StructField, IntegerType, StringType, FloatType
+import pyspark.sql.functions as F
+from pyspark.sql.functions import split, reverse, trim
+from pyspark.sql.functions import col, collect_set, collect_list,concat_ws, regexp_replace
+from pyspark.sql.functions import count,desc, row_number, when, sum, lit
+from pyspark.sql import SparkSession
+from pyspark.sql.window import Window
+from pyspark.sql.functions import collect_list, col
+from pyspark.sql.functions import length, concat,concat_ws, when,size
+from pyspark.sql.functions import udf
+from pyspark.sql.types import StringType
+
+
+#Change the txt file here
+# Open the file in read mode 
+
+results = []
+
+with open('/Workspace/Shared/Account Radar Templates/Wave-03.1/Clients_List/Set-1.txt', 'r') as file:  
+    # Read all lines into a list  
+    lines = file.readlines()  
+
+client_account_names = [li.strip() for li in lines]
+
+print(len(client_account_names))
+print(client_account_names)
+
+from azure.cosmos import CosmosClient, PartitionKey, exceptions
+URL = "https://cal-account-planning.documents.azure.com:443/"
+cosmosdb_key = dbutils.secrets.get(scope="ml-secret-scope", key="cosmosdb_key")
+cosmos_client = CosmosClient(URL, cosmosdb_key)
+# cosmos_client = CosmosClient(URL, credential=KEY)
+
+DATABASE_NAME = 'demo'
+database = cosmos_client.get_database_client(DATABASE_NAME)
+CONTAINER_NAME = 'clients_ref'
+
+container = database.get_container_client(CONTAINER_NAME)
+query = """SELECT c.draup_name, c.accenture_name, c.account_SAP_id, c.short_name FROM c where c.draup_name IN ({})""".format(", ".join([f'''"{name}"''' for name in client_account_names]))
+
+items = list(container.query_items(
+    query=query,
+    enable_cross_partition_query=True
+))
+
+# Reorder the dictionary keys as per the required order before creating the DataFrame
+SAPID_short_name_dict = {item["draup_name"].strip(): {"accenture_name": item["accenture_name"].strip(),"account_SAP_id": item["account_SAP_id"], "short_name": item["short_name"]} for item in items}
+
+def get_mcsapid(account_name):
+    if account_name in SAPID_short_name_dict:
+        if SAPID_short_name_dict[account_name]["account_SAP_id"] is not None:
+            return SAPID_short_name_dict[account_name]["account_SAP_id"]
+        else:
+            return "Not Available"
+    else:
+        return "Not Available"
+
+def get_short_name(account_name):   
+    if account_name in SAPID_short_name_dict:
+        if SAPID_short_name_dict[account_name]["short_name"] is not None and SAPID_short_name_dict[account_name]["account_SAP_id"]!='':
+            return SAPID_short_name_dict[account_name]["short_name"]
+        else:
+            return "Not Available"
+    else:
+        return "Not Available"
+
+def get_accenture_name(account_name):
+    if account_name in SAPID_short_name_dict:
+        if SAPID_short_name_dict[account_name]["accenture_name"] is not None and SAPID_short_name_dict[account_name]["account_SAP_id"]!='':
+            return SAPID_short_name_dict[account_name]["accenture_name"]
+        else:
+            return "Not Available"
+    else:
+        return "Not Available"
+
+import re
+
+def apply_regex_to_name(name):
+    # Apply regex pattern to remove illegal characters from the name
+    modified_name = re.sub(r"[^\w\-]", "", name)
+    
+    return modified_name
+	
+# Initialize Spark Session
+spark = SparkSession.builder.appName("Top5ProductsByPartner").getOrCreate()
+
+# Load Excel File
+excel_path = "/Workspace/Shared/Account Radar PPT/Prathyusha/Wave5.1/Technology Assessment Tracking AM-2025-03-18-04-13-27_Sample Template_1.xlsx"  # Update with actual path
+sheet_name = "Data"  # Update if the sheet name is different
+
+# Read Excel using Pandas and Convert to Spark DataFrame (since PySpark doesn't support direct Excel read)
+import pandas as pd
+
+# Read the Excel file using Pandas
+pdf = pd.read_excel(excel_path, sheet_name=sheet_name)
+
+# Convert Pandas DataFrame to Spark DataFrame
+technology_assessment_df = spark.createDataFrame(pdf)
+
+partner_mapping = {
+    'Oracle': 'ORACLE',
+    'SAP AG.': 'SAP',
+    'Salesforce.com, Inc.': 'SALESFORCE',
+    'IBM': 'IBM',
+    'Microsoft': 'MICROSOFT',
+    'Adobe Inc.': 'ADOBE',
+    'Workday': 'WORKDAY',
+    'Pegasystems, Inc.': 'PEGASYSTEMS',
+    'ServiceNow Inc.': 'SERVICENOW',
+    'Google Inc.': 'GOOGLE',
+    'Amazon Web Services Inc.': 'AWS'
+}
+
+partners_list = ['ORACLE', 'SAP', 'SALESFORCE', 'IBM', 'MICROSOFT', 'ADOBE', 'WORKDAY', 'PEGASYSTEMS', 'SERVICENOW', 'GOOGLE', 'AWS']
+
+technology_assessment_df = technology_assessment_df.select("Account", "ID", "Partner", "Product Description") \
+    .filter(F.col("Partner").isin(*partner_mapping.keys())) \
+    .withColumn("Partner", F.expr(f"CASE Partner {' '.join([f'WHEN \'{k}\' THEN \'{v}\'' for k, v in partner_mapping.items()])} END"))
+
+technology_assessment_df = technology_assessment_df.filter(F.col("Product Description").isNotNull() & ~F.col("Product Description").startswith("zInactive"))
+
+def get_all_products_top_partners(client_name):
+    # Filter DataFrame for the specified client and valid partners
+    filtered_df = technology_assessment_df.filter(F.col("Account") == client_name)
+
+    # Early exit if no matching records
+    if filtered_df.rdd.isEmpty():
+        return f"No partner data found for {client_name}."
+
+    # Clean the Product Description (remove "PARTNER - " prefix)
+    cleaned_df = filtered_df.withColumn(
+        "Clean Product Description",
+        F.when(
+            F.col("Product Description").contains(" - "),
+            F.expr("split(`Product Description`, ' - ')[size(split(`Product Description`, ' - ')) - 1]")
+        ).otherwise(F.col("Product Description"))
+    )
+
+    # Count product frequency per partner
+    product_freq_df = cleaned_df.groupBy("Partner", "Clean Product Description").agg(F.count("*").alias("product_count"))
+
+    # Define a window partitioned by Partner name, ordered by product frequency
+    window_spec = Window.partitionBy("Partner").orderBy(F.desc("product_count"), F.asc("Clean Product Description"))
+
+    # Rank products within each Partner and select top 12
+    ranked_products_df = (
+        product_freq_df.withColumn("rank", F.row_number().over(window_spec))
+        .filter(F.col("rank") <= 12)
+    )
+
+    # Group by partner and collect list of cleaned product descriptions
+    partner_products = (
+        ranked_products_df.groupBy("Partner")
+        .agg(F.collect_list("Clean Product Description").alias("Products"))
+    )
+
+    # Collect results
+    partners_with_products_list = partner_products.collect()
+
+    # Format result dictionary
+    temp_dict = {}
+    for row in partners_with_products_list:
+        partner = row['Partner']
+        products = [p for p in row['Products'] if p]  # Filter out nulls
+        if products:
+            temp_dict[partner] = products 
+
+    # Final results
+    result={}
+    for partner in partners_list:
+        if partner in temp_dict:
+            result[partner] = temp_dict[partner]
+    
+    for partner in partners_list:
+        if partner not in result:
+            result[partner] = "Note: No data currently available"
+
+    return result
+	
+chapter = "Understand your client tech stack​"
+clean_chapter = chapter.replace('\u200b', '')
+section = "Client Ecosystem Partners"
+
+questions = "what is the clients techstack?"
+refs = ["account_tech_stack"]
+
+for name in client_account_names:
+    accenture_name = get_accenture_name(name)
+    if accenture_name!='Not Available':
+        res = get_all_products_top_partners(accenture_name)
+    else:
+        res = f'No partner data found for {name}.'
+    
+    suffix = str(round(time.time() * 1000))
+    json_id = f"{apply_regex_to_name(name)}_{suffix}"
+
+    results.append({
+        "id": json_id,
+        "client_name": name,
+        "account_SAP_id": get_mcsapid(name),
+        "chapter": clean_chapter,
+        "section": section,
+        "question": questions,
+        "answer": res,
+        "regex_client": apply_regex_to_name(name),
+        "short_name": get_short_name(name)
+    })
+    
+    print(results[-1])
+	
+
+len(results)
+
+# from azure.cosmos import CosmosClient, PartitionKey, exceptions
+ 
+# URL = "https://cal-account-planning.documents.azure.com:443/"
+# KEY = dbutils.secrets.get(scope="ml-secret-scope", key="cosmosdb_key")
+ 
+# client = CosmosClient(URL, credential=KEY)
+# DATABASE_NAME = 'demo'
+# database = client.get_database_client(DATABASE_NAME)
+# CONTAINER_NAME = 'AR_Current'
+ 
+# try:
+#     container = database.create_container(id=CONTAINER_NAME, partition_key=PartitionKey(path="/id"))
+# except exceptions.CosmosResourceExistsError:
+#     container = database.get_container_client(CONTAINER_NAME)
+# except exceptions.CosmosHttpResponseError:
+#     container = database.get_container_client(CONTAINER_NAME)
+ 
+# for item in results:
+#     container.upsert_item(item)
+
+# print("DONE")
+
+
+
+		
