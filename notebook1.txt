@@ -1,0 +1,376 @@
+%md
+Please uncomment cosmos cell(last cell) to push the clients
+Removed the Old Response key in the Response Generation
+
+%pip install openai==1.25.2
+dbutils.library.restartPython()
+%pip install azure.cosmos
+
+import openai, os, requests, time, json
+import pandas as pd
+from pyspark.sql.types import StructType, StructField, IntegerType, StringType
+import pyspark.sql.functions as F
+from pyspark.sql.functions import split, reverse, trim
+from pyspark.sql.functions import col, collect_set
+from pyspark.sql import SparkSession
+from pyspark.sql.window import Window
+
+SEARCH_KEY = dbutils.secrets.get(scope = "CAL", key = "search-key")
+OPENAI_KEY = dbutils.secrets.get(scope = "CAL", key = "openai-key")
+openai.api_type = "azure"
+# Azure OpenAI on your own data is only supported by the 2023-08-01-preview API version
+# openai.api_version = "2023-08-01-preview"
+# Azure OpenAI setup
+# openai.api_base = "https://cal-azureopenai-gpt4.openai.azure.com/" # Add your endpoint here
+openai_endpoint = "https://cal-azureopenai-gpt4.openai.azure.com/"
+openai.api_key = OPENAI_KEY   #os.getenv("OPENAI_API_KEY") # Add your OpenAI API key here
+deployment_id = "gpt-4o" # Add your deployment ID here
+# Azure AI Search setup
+search_endpoint = "https://calsearch.search.windows.net"; # Add your Azure AI Search endpoint here
+# search_key = SEARCH_KEY; # Add your Azure AI Search key here
+
+openai_api_key = OPENAI_KEY
+search_api_key = SEARCH_KEY
+
+results = []
+
+# #Change the txt file here
+# # Open the file in read mode  
+with open('/Workspace/Shared/Account Radar - Updated Notebooks/Kamya wave1- templates running/clients.txt', 'r') as file:  
+    # Read all lines into a list  
+    lines = file.readlines()  
+
+client_account_names = [li.strip() for li in lines]
+
+#client_account_names = client_account_names[160:162]
+client_account_names =["Ontario Teachers' Pension Plan"]
+client_account_names
+
+# Load the MCSAP IDs from an Excel workbook into a pandas DataFrame
+mcsap_ids_pd_df = pd.read_csv('/Workspace/Shared/Account Radar PPT/Data/mcsap_ids.csv',encoding='ISO-8859-1')
+
+# Convert the 'column' from float to int if necessary
+mcsap_ids_pd_df['MCSAPID_ID'] = mcsap_ids_pd_df['MCSAPID_ID'].fillna(-1).astype(int)
+
+# Initialize Spark session
+#spark = SparkSession.builder.appName("example").getOrCreate()
+
+# Define the schema explicitly
+schema = StructType([
+    StructField("account_name", StringType(), True),
+    StructField("MCSAPID_ID", IntegerType(), True)
+    # Add other fields as needed
+])
+
+# Create Spark DataFrame with the specified schema
+mcsap_ids_df = spark.createDataFrame(mcsap_ids_pd_df, schema=schema)
+
+def get_mcsapid(name):
+    results=mcsap_ids_df.filter(mcsap_ids_df.account_name==name).collect()
+    if len(results) > 0:
+        mcsap_id = results[0]['MCSAPID_ID']
+    else:
+        mcsap_id = "Not Available"
+    
+    if mcsap_id==-1:
+        mcsap_id="Not Available"
+    return mcsap_id
+	
+
+import re
+ 
+def apply_regex_to_name(name):
+    # Apply regex pattern to remove illegal characters from the name
+    modified_name = re.sub(r"[^\w\-]", "", name)
+   
+    return modified_name
+	
+#Prompt over cosmos response
+
+# Initialize Cosmos DB client for CALGPT
+from azure.cosmos import CosmosClient
+
+endpoint = "https://cal-account-planning.documents.azure.com:443/"
+key = "nBv6qarmktE0JQBQ9QLs7aCDha9vSdHRsEqdoVBz5jJWdC7BN0wIJ3DBsmoNePNiu8BhsEt8zL9WACDbzLJsYw=="
+client = CosmosClient(endpoint, key)
+database_name = "demo"
+#container_name = "CI_data"
+container_name = "AR_Wave1"
+container = client.get_database_client(database_name).get_container_client(container_name)
+
+# Using prompt on cosmos response for slide8,9
+
+search_index_name = "draup-intentions"
+def usecase_descption(search_index_name, search_endpoint, search_api_key, usecaseDescrp, account_name):
+    prompt_text = f"""
+    Consider the client account is '{account_name}'.
+    The task is to return a suitiable title (company initiative name) for the usecase description {usecaseDescrp}. STRICTLY PROVIDE INFORMATION REGARDING {account_name} ONLY.
+   
+    Remember:  DO NOT INCLUDE ANY CITATIONS (such as [doc1],[doc2]) IN YOUR RESPONSE. Don't Let The End User Know That You are an AI Assistant. Just Print The Information That You are able to gather. Answer solely based on given information in the Data. If the user requests information that is not in the data or from another source, say ‘Data Unavailable’.
+    """
+
+    filter_exp = f"client_account eq '{account_name}'"
+
+    endpoint = "https://cal-azureopenai-gpt4.openai.azure.com/"
+    deployment = "gpt-4o"
+    api_key = "api_key"
+    
+    #client = initialize_client(endpoint, deployment, api_key)
+    completion = call_gpt4_byod(prompt_text, search_index_name, search_endpoint, filter_exp)
+    
+    generated_text = completion.choices[0].message.content
+    return generated_text 
+	
+def get_summary_keydigital(val):
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "user", "content": f"Summarize below text:\n\n{val}.\n\nKeep it short and straight to point so that it is quickly readable and STRICTLY limit it to 3 to 4 lines"}
+        ],
+        temperature=0.7
+    )
+    return response.choices[0].message.content
+	
+# Function to get usecase description along with title
+def get_modified_usecase(account_name, search_index_name, search_endpoint, search_api_key):
+    result_strings = []
+    # Execute the SQL query to retrieve distinct client names
+    query = f"SELECT DISTINCT c.client_name, c.question, c.answer FROM c WHERE c.client_name = '{account_name}' and c.question= 'What Are The key Digital Initiative running At The Account based on digital theme of the business intention ?' ORDER BY c.id DESC"
+    
+    items = list(container.query_items(query, enable_cross_partition_query=True))
+
+    if len(items)==0:
+        return "Data Unavailable"
+    
+    # Extract client names, questions, and answers from query results
+    answer = items[0]['answer']
+    answers = answer.split('\n\n')
+    for val in answers:
+        title = usecase_descption(search_index_name, search_endpoint, search_api_key, val, account_name)
+        val = get_summary_keydigital(val)
+        temp_str = f"*{title}*: {val}"
+        result_strings.append(temp_str)
+
+    final_result_string = "\n\n".join(result_strings)
+    return (final_result_string) if final_result_string else ("No valid information found for the account.")
+
+
+
+# Initialize the OpenAI client
+client = openai.AzureOpenAI(
+    azure_endpoint=openai_endpoint,
+    api_key=openai_api_key,
+    api_version="2024-02-01",
+)
+ 
+# Function to call GPT-4 BYOD
+# def call_gpt4_byod(prompt_text, search_index_name, search_endpoint, filter_exp):
+def call_gpt4_byod(prompt_text, search_index_name, search_endpoint,filter_exp):
+    completion = client.chat.completions.create(
+        model=deployment_id,
+        messages=[
+            {
+                "role": "user",
+                "content": prompt_text,
+            },
+        ],
+        extra_body={
+            "data_sources": [
+                {
+                    "type": "azure_search",
+                    "parameters": {
+                        "endpoint": search_endpoint,
+                        "index_name": search_index_name,  
+                        "authentication": {
+                            "type": "api_key",
+                            "key": search_api_key,
+                        }
+                    }
+                }
+            ],
+        },
+        # enhancements=None,
+        temperature=0.7,
+        top_p=1,
+        max_tokens=800,
+        stop=None,
+        stream=False
+        # seed=42
+    )
+    return completion
+ 
+# Function to extract references from the completion response
+def get_references(completion_response):
+    # contexts = json.loads(completion_response["choices"][0]["message"]["context"]["messages"][0]["content"])
+    # contexts = json.loads(completion_response.choices[0].message.context)
+    contexts = completion_response.choices[0].message.context
+    reference_tables = set()
+    for cit in contexts["citations"]:
+        reference_tables.add(cit["filepath"])
+    return list(reference_tables)
+ 
+# Function to prompt the model and get the response and references
+def prompt_function(client_account_name, search_index_name, question_prompt):
+    prompt_text = f"""
+    Remember: DO NOT INCLUDE ANY CITATIONS (such as [doc1],[doc2]) IN YOUR RESPONSE. Don't Let The End User Know That You are an AI Assistant. Just Print The Information That You are able to gather. (Do not include citations, e.g. [doc1] etc., in your response text). Answer solely based on given information in the Data. If the user requests information that is not in the data, say ‘Data Unavailable’.
+    
+    Now for the client account '{client_account_name}' answer the following:
+    {question_prompt}
+    """
+    filter_exp = f"client_account eq '{client_account_name}'"
+ 
+    completion = call_gpt4_byod(prompt_text, search_index_name, search_endpoint, filter_exp)
+    # generated_text = completion["choices"][0]["message"]["content"]
+    generated_text = completion.choices[0].message.content
+    reference_tables = get_references(completion)
+    return generated_text, reference_tables
+  
+  
+  search_index_name = "draup-intentions"
+search_endpoint = "https://calsearch.search.windows.net"
+search_api_key = "JxNnVsshzSVcGgQ9iR7NtSywUbeZAKe7KtSOLRjKsaAzSeCikBqR"
+
+chapter = "What are your clients Business Initiatives?"
+section = "Client Business Needs"
+slide = "7,8,9"
+questions = "What Are The key Digital Initiative running At The Account based on digital theme of the business intention ?"
+refs = ["draup_business_intentions"]
+
+for name in client_account_names:
+    time.sleep(5.0)
+    res = get_modified_usecase(name, search_index_name, search_endpoint, search_api_key)
+    suffix = str(round(time.time() * 1000))
+    json_id = f"{apply_regex_to_name(name)}_{suffix}"
+    results.append({
+        "id": json_id,
+        "client_name": name,
+        "account_SAP_id": get_mcsapid(name),
+        "chapter": chapter,
+        "section": section,
+        "slide_number": slide,
+        "question": questions,
+        "answer": res,
+        "citation": refs,
+        "response": "new",
+        "regex_client": apply_regex_to_name(name)
+    })
+    print(results[-1])
+    time.sleep(5.0)
+	
+%md
+##Using prompt on cosmos response for Slide 5,6 
+
+search_index_name = "draup-intentions"
+def initiatives_prompt(search_index_name, search_endpoint, search_api_key, initiative, account_name):
+    prompt_text = f"""
+    Consider the client account is '{account_name}'.
+    The task is to return key-value pairs from {initiative} with keys: Initiative Name, Classification, Description. Return classification from either In-House, Partnership or Aquisition only. 
+
+   
+    Remember:  DO NOT INCLUDE ANY CITATIONS (such as [doc1],[doc2]) IN YOUR RESPONSE. Don't Let The End User Know That You are an AI Assistant. Just Print The Information That You are able to gather. Answer solely based on given information in the Data. If the user requests information that is not in the data or from another source, say ‘Data Unavailable’. In the Description, if the initiative is Aquisition then bold the aquired company name, else if the initiative is Partnership then bold the partner name, else if the initiative is In-House then bold any company name involved other than {account_name} or bold the usecase implemented or bold any important keyword. STRICTLY DO NOT BOLD client name '{account_name}'. Provide information regarding '{account_name}' only. Ensure the output is a clean dictionary with keys: Initiative Name, Classification, Description, without extra formatting or code blocks.
+    """
+
+    filter_exp = f"client_account eq '{account_name}'"
+
+    endpoint = "https://cal-azureopenai-gpt4.openai.azure.com/"
+    deployment = "gpt-4o"
+    api_key = "api_key"
+    
+    #client = initialize_client(endpoint, deployment, api_key)
+    completion = call_gpt4_byod(prompt_text, search_index_name, search_endpoint, filter_exp)
+    
+    generated_text = completion.choices[0].message.content
+    return generated_text 
+	
+	# Function to get usecase description along with title
+def get_modified_initiative(account_name, search_index_name, search_endpoint, search_api_key):
+    result_strings = []
+    # Execute the SQL query to retrieve distinct client names
+    query = f"SELECT DISTINCT c.client_name, c.question, c.answer FROM c WHERE c.client_name = '{account_name}' and c.question= 'What is the Initiative Name? What is the Initiative Type? What are the Key Engagements?' ORDER BY c.id DESC"
+    
+    items = list(container.query_items(query, enable_cross_partition_query=True))
+
+    if len(items)==0:
+        return "Data Unavailable"
+    
+    # Extract client names, questions, and answers from query results
+    answer = items[0]['answer']
+    # Identify the point where the actual list starts
+    start_point = answer.find("1.")
+
+    # Extract the list part only
+    if start_point!=-1:
+        list_part = answer[start_point:]
+        answers = list_part.split('\n\n')
+    else:
+        answers = answer.split('\n\n')
+
+    for valu in answers:
+        initiative_details = initiatives_prompt(search_index_name, search_endpoint, search_api_key, valu, account_name)
+
+        result_strings.append(initiative_details)
+        
+    if(result_strings):
+        return result_strings
+    else:
+        return "No valid information found for the account."
+
+
+search_index_name = "draup-intentions"
+search_endpoint = "https://calsearch.search.windows.net"
+search_api_key = "JxNnVsshzSVcGgQ9iR7NtSywUbeZAKe7KtSOLRjKsaAzSeCikBqR"
+
+chapter = "Understanding their Ecosystem Partners"
+section = "Client Ecosystem Partners"
+slide = "5,6"
+questions = "What is the Initiative Name? What is the Initiative Type? What are the Key Engagements?"
+refs = ["draup_business_intentions"]
+
+for name in client_account_names:
+    time.sleep(5.0)
+    res = get_modified_initiative(name, search_index_name, search_endpoint, search_api_key)
+    suffix = str(round(time.time() * 1000))
+    json_id = f"{apply_regex_to_name(name)}_{suffix}"
+    results.append({
+        "id": json_id,
+        "client_name": name,
+        "account_SAP_id": get_mcsapid(name),
+        "chapter": chapter,
+        "section": section,
+        "slide_number": slide,
+        "question": questions,
+        "answer": res,
+        "citation": refs,
+        "response": "new",
+        "regex_client": apply_regex_to_name(name)
+    })
+    print(results[-1])
+    time.sleep(5.0)
+	
+results
+
+# Write to Cosmos DB
+
+from azure.cosmos import CosmosClient, PartitionKey, exceptions
+ 
+URL = "https://cal-account-planning.documents.azure.com:443/"
+KEY = ""#dbutils.secrets.get(scope = "CAL", key = "cosmosdb-key")
+KEY = "nBv6qarmktE0JQBQ9QLs7aCDha9vSdHRsEqdoVBz5jJWdC7BN0wIJ3DBsmoNePNiu8BhsEt8zL9WACDbzLJsYw=="
+ 
+client = CosmosClient(URL, credential=KEY)
+DATABASE_NAME = 'demo'
+database = client.get_database_client(DATABASE_NAME)
+CONTAINER_NAME = 'AR_Wave1b'
+ 
+try:
+    container = database.create_container(id=CONTAINER_NAME, partition_key=PartitionKey(path="/id"))
+except exceptions.CosmosResourceExistsError:
+    container = database.get_container_client(CONTAINER_NAME)
+except exceptions.CosmosHttpResponseError:
+    container = database.get_container_client(CONTAINER_NAME)
+ 
+for item in results:
+    container.upsert_item(item)
+ 
+print("DONE")
+
