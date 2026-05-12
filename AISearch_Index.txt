@@ -1,0 +1,211 @@
+# AI Search RBAC Fix
+
+%pip install azure-search-documents
+%pip install --upgrade openai
+%pip install azure-identity
+dbutils.library.restartPython()
+
+import openai, os, requests, time, json
+from openai import AzureOpenAI
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+import pandas as pd
+from pyspark.sql.types import StructType, StructField, IntegerType, StringType
+
+# import pyspark.sql.functions as F
+# from pyspark.sql.functions import split, reverse, trim
+# from pyspark.sql.functions import col, collect_set
+# from pyspark.sql import SparkSession
+# from pyspark.sql.window import Window
+
+openai.api_type = "azure"
+# Defining the OpenAI Endpoint
+endpoint = "https://cal-azureopenai-gpt4.openai.azure.com/"
+deployment = "gpt-4o" 
+# Azure AI Search setup
+search_endpoint = "https://calsearch.search.windows.net"; # Add your Azure AI Search endpoint here
+token_provider = get_bearer_token_provider(DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default")
+
+results = []
+
+# Load the MCSAP IDs from an Excel workbook into a pandas DataFrame
+mcsap_ids_pd_df = pd.read_csv('/Workspace/Shared/Account Radar PPT/Data/mcsap_ids.csv',encoding='ISO-8859-1')
+
+# Convert the 'column' from float to int if necessary
+mcsap_ids_pd_df['MCSAPID_ID'] = mcsap_ids_pd_df['MCSAPID_ID'].fillna(-1).astype(int)
+
+# Initialize Spark session
+#spark = SparkSession.builder.appName("example").getOrCreate()
+
+# Define the schema explicitly
+schema = StructType([
+    StructField("account_name", StringType(), True),
+    StructField("MCSAPID_ID", IntegerType(), True)
+    # Add other fields as needed
+])
+
+# Create Spark DataFrame with the specified schema
+mcsap_ids_df = spark.createDataFrame(mcsap_ids_pd_df, schema=schema)
+
+def get_mcsapid(name):
+    results=mcsap_ids_df.filter(mcsap_ids_df.account_name==name).collect()
+    if len(results) > 0:
+        mcsap_id = results[0]['MCSAPID_ID']
+    else:
+        mcsap_id = "Not Available"
+    
+    if mcsap_id==-1:
+        mcsap_id="Not Available"
+    return mcsap_id
+	
+	
+
+# Initialize the OpenAI client
+client = AzureOpenAI(
+    azure_endpoint=endpoint,
+    azure_ad_token_provider=token_provider,
+    api_version="2024-05-01-preview",
+)
+ 
+# Function to call GPT-4 BYOD
+# def call_gpt4_byod(prompt_text, search_index_name, search_endpoint, filter_exp):
+def call_gpt4_byod(prompt_text, search_index_name, search_endpoint,filter_exp):
+    completion = client.chat.completions.create(
+        model=deployment,
+        messages=[
+            {
+                "role": "user",
+                "content": prompt_text,
+            },
+        ],
+        extra_body={
+            "data_sources": [
+                {
+                    "type": "azure_search",
+                    "parameters": {
+                        "endpoint": search_endpoint,
+                        "index_name": search_index_name,  
+                        "authentication": {
+                            "type": "system_assigned_managed_identity",
+                        }
+                    }
+                }
+            ],
+        },
+        # enhancements=None,
+        temperature=0.7,
+        top_p=1,
+        max_tokens=800,
+        stop=None,
+        stream=False
+        # seed=42
+    )
+    return completion
+ 
+# Function to extract references from the completion response
+def get_references(completion_response):
+    # contexts = json.loads(completion_response["choices"][0]["message"]["context"]["messages"][0]["content"])
+    # contexts = json.loads(completion_response.choices[0].message.context)
+    contexts = completion_response.choices[0].message.context
+    reference_tables = set()
+    for cit in contexts["citations"]:
+        reference_tables.add(cit["filepath"])
+    return list(reference_tables)
+ 
+# Function to prompt the model and get the response and references
+
+def prompt_function(client_account_name, search_index_name, question_prompt):
+    filter_exp = f"{client_account_name}"
+    prompt_text = "Prompt Written Here"
+    completion = call_gpt4_byod(prompt_text, search_index_name, search_endpoint, filter_exp)
+    # generated_text = completion["choices"][0]["message"]["content"]
+    generated_text = completion.choices[0].message.content
+    reference_tables = get_references(completion)
+    return generated_text, reference_tables
+  
+client_account_names = ["Apple Inc."]
+
+#OpenAI Token Per Minute Limit
+ 
+#Search Index Name
+search_index_name = "draup-overview-and-other"; # Add your Azure AI Search index namehere
+ 
+def whattheclientdoes(name, search_index_name):
+ 
+  savefile_prefix = "outputs/slide_08_famous"
+  filter_exp = f"client_account eq '{name}'"
+  questions = "Describe what they do, and who their main customers are?"
+ 
+  prompt_text = f"""You are a **Business Domain** query resolving chatbot for Leadership.
+    Please answer below question for the client account namely "{name}"-
+    "Describe what {name} does, and who are their main customers?"
+    Consider The Response at a Global Level Without Restricting Yourself to Focus on One Country Alone if Data is Available. Follow below pointers while generating your response- 
+    Remember:  DO NOT INCLUDE ANY CITATIONS (such as [doc1],[doc2]) IN YOUR RESPONSE. Don't Let The End User Know That You are an AI Assistant. Just Print The Information That You are able to gather. Print the information in one single paragraph. Answer solely based on given information in the Data. If the user requests information that is not found in the data ,  STRICTLY say ‘Data Unavailable’. 
+    #"""
+
+  completion = call_gpt4_byod(prompt_text,search_index_name,search_endpoint,filter_exp)
+ 
+  # generated_text = completion["choices"][0]["message"]["content"]
+  generated_text = completion.choices[0].message.content
+ 
+  reference_tables = get_references(completion)
+ 
+  #content_text = completion["choices"][0]["message"]["content"]
+  #generated_text = f"{content_text} ( References: {reference_tables} )"
+ 
+  return generated_text,reference_tables
+ 
+ 
+ 
+chapter = "What defines your client? Objective, Fact"
+section = "Company Overview"
+slide = "4"
+ 
+questions = "Describe what they do, and who their main customers are."
+ 
+for name in client_account_names:
+  time.sleep(5.0)
+  res,refs = whattheclientdoes(name,search_index_name)
+  suffix  = str(round(time.time() * 1000))
+  json_id = f"{name}_{suffix}"
+  results.append({
+        "id": json_id,
+        "client_name": name,
+        "account_SAP_id": get_mcsapid(name),
+        "chapter": chapter,
+        "section": section,
+        "slide_number": slide,
+        "question": questions,
+        "answer": res
+        })
+  print(results[-1])
+ 
+ 
+#results
+
+# from azure.cosmos import CosmosClient, PartitionKey, exceptions
+ 
+# URL = "https://cal-account-planning.documents.azure.com:443/"
+# KEY = ""#dbutils.secrets.get(scope = "CAL", key = "cosmosdb-key")
+# KEY = "nBv6qarmktE0JQBQ9QLs7aCDha9vSdHRsEqdoVBz5jJWdC7BN0wIJ3DBsmoNePNiu8BhsEt8zL9WACDbzLJsYw=="
+ 
+# client = CosmosClient(URL, credential=KEY)
+# DATABASE_NAME = 'demo'
+# database = client.get_database_client(DATABASE_NAME)
+# CONTAINER_NAME = 'test_container'
+ 
+# try:
+#     container = database.create_container(id=CONTAINER_NAME, partition_key=PartitionKey(path="/id"))
+# except exceptions.CosmosResourceExistsError:
+#     container = database.get_container_client(CONTAINER_NAME)
+# except exceptions.CosmosHttpResponseError:
+#     container = database.get_container_client(CONTAINER_NAME)
+ 
+# for item in results:
+#     container.upsert_item(item)
+ 
+# print("DONE")
+
+
+
+  
+
