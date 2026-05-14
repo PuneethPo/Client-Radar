@@ -1,0 +1,276 @@
+# Installing azure-search-documents Package
+
+# %pip install azure-search-documents
+# %pip install azure-identity
+# dbutils.library.restartPython()
+
+#Importing Required Libraries
+
+from typing import List  
+import re  
+from datetime import datetime  
+from azure.storage.blob import BlobServiceClient  
+from azure.identity import DefaultAzureCredential
+from azure.search.documents import SearchClient
+from azure.search.documents.indexes import SearchIndexClient,SearchIndexerClient
+from azure.search.documents.indexes.models import (
+    SearchIndexerDataContainer,
+    SearchIndex,
+    SearchIndexer,
+    SearchableField,
+    SimpleField,
+    ComplexField,
+    SearchFieldDataType,
+    EntityRecognitionSkill,
+    InputFieldMappingEntry,
+    OutputFieldMappingEntry,
+    SearchIndexerSkillset,
+    CorsOptions,
+    IndexingSchedule,
+    SearchableField,
+    IndexingParameters,
+    SearchIndexerDataSourceConnection,
+    IndexingParametersConfiguration,
+    ScoringProfile,
+    CorsOptions,
+    SemanticConfiguration,
+    SemanticPrioritizedFields,
+    SemanticField,
+    SemanticSearch
+)
+
+# Configuring Azure AI Search Endpoint
+
+search_service_endpoint = "https://calsearch.search.windows.net"
+
+# Pulling the Connection String from Secret Scope
+
+# scope_name = "data-ingestion-scope"
+# conn_str = dbutils.secrets.get(scope=scope_name, key="draupdatalanding-conn-str")
+
+from azure.identity import DefaultAzureCredential
+from azure.storage.blob import BlobServiceClient
+import re
+from datetime import datetime
+storage_account_url = "https://crdraupdatalanding.blob.core.windows.net/"
+credential = DefaultAzureCredential()
+
+# Defining the Index-Table Mapping
+
+# index_map = { 
+#     'draup-overview-and-signals': {'merges_and_acquisitions','draup_account_priority_usecase_mapping_merged','signals','accounts_competitors','account_locations','accounts_about','intention_customer_scenario_impact'},
+#     'draup-swot': {'intentions_usecase_technology', 'accounts_competitors', 'account_outsourcing', 'account_locations', 'accounts_about', 'intention_customer_scenario_impact', 'account_transcripts', 'account_financials','signals'}
+# }
+
+index_map = {
+    'test-index-foundryiq': {'accounts_about'}
+}
+
+# Getting the Latest Folder Path from Blob Storage
+
+# Initialize the BlobServiceClient using DefaultAzureCredential
+blob_service_client = BlobServiceClient(account_url=storage_account_url, credential=credential)
+container_name = 'aisearchnarrations'
+container_client = blob_service_client.get_container_client(container_name)
+folder_names = set()
+blob_list = container_client.walk_blobs(delimiter='/')
+for blob_prefix in blob_list:
+    folder_name = blob_prefix.name.rstrip('/')
+    folder_names.add(folder_name)
+unique_folder_names = sorted(folder_names)
+date_pattern = re.compile(r'^\d{8}$')
+date_folders = [name for name in unique_folder_names if date_pattern.match(name)]
+date_objects = [datetime.strptime(date_str, "%Y%m%d") for date_str in date_folders]
+if date_objects:
+    latest_date = max(date_objects)
+    folder_path = latest_date.strftime("%Y%m%d")
+    print(folder_path)
+else:
+    print("No date folders found.")
+	
+#Defining the Create Datasource Function
+
+# def create_datasources_from_index_map(index_map, folder_path):  
+#     ds_client = SearchIndexerClient(  
+#         endpoint=search_service_endpoint,  
+#         credential=DefaultAzureCredential()  
+#     )  
+      
+#     unique_values = set()  
+#     for value in index_map.values():  
+#         unique_values.update(value)  
+      
+#     # Normalize the unique values for data source names (replace underscores with dashes)  
+#     normalized_values_map = {}  
+#     for value in unique_values:  
+#         # Replace underscores and other non-alphanumeric characters with dashes for normalized names  
+#         normalized_value = re.sub(r'[^a-z0-9-]', '-', value.lower())  # Replace non-alphanumeric characters with dashes  
+#         normalized_value = re.sub(r'-+', '-', normalized_value).strip('-')  # Remove consecutive dashes and leading/trailing dashes  
+#         normalized_value = normalized_value[:128]  # Truncate to 128 characters (Azure limit)  
+#         normalized_values_map[value] = normalized_value  # Map original to normalized  
+      
+#     # Iterate using the original and normalized values  
+#     for original_value, normalized_value in normalized_values_map.items():  
+#         # Use the original value (with underscores intact) for folder path  
+#         datasource_path = f"{folder_path}/draup.{original_value}"  # Original value for path  
+#         container = SearchIndexerDataContainer(name="indexdatasource", query=datasource_path)  
+          
+#         # Use the normalized value (with underscores replaced by dashes) for data source name  
+#         data_source_connection = SearchIndexerDataSourceConnection(  
+#             name=normalized_value,  # Normalized value for the name  
+#             type="azureblob",  
+#             connection_string=conn_str,  
+#             container=container  
+#         )  
+          
+#         # Create the data source connection  
+#         data_source = ds_client.create_data_source_connection(data_source_connection)  
+#         print(f"Data source '{normalized_value}' created successfully")# pointing to '{datasource_path}'.")  
+
+# Replace with your storage account's resource ID
+storage_account_resource_id = "/subscriptions/dac6b562-b7ba-476a-95f2-7b71255f1f85/resourceGroups/rg-clientradar-hadr/providers/Microsoft.Storage/storageAccounts/crdraupdatalanding"
+
+def create_datasources_from_index_map(index_map, folder_path):  
+    ds_client = SearchIndexerClient(  
+        endpoint=search_service_endpoint,  
+        credential=DefaultAzureCredential()  
+    )  
+  
+    unique_values = set()  
+    for value in index_map.values():  
+        unique_values.update(value)  
+  
+    normalized_values_map = {}  
+    for value in unique_values:  
+        normalized_value = re.sub(r'[^a-z0-9-]', '-', value.lower())  
+        normalized_value = re.sub(r'-+', '-', normalized_value).strip('-')  
+        normalized_value = normalized_value[:128]  
+        normalized_values_map[value] = normalized_value  
+  
+    for original_value, normalized_value in normalized_values_map.items():  
+        datasource_path = f"{folder_path}/draup.{original_value}"  
+        container = SearchIndexerDataContainer(name="aisearchnarrations", query=datasource_path)  
+  
+        # Use identity-based authentication for blob storage
+        data_source_connection = SearchIndexerDataSourceConnection(  
+            name=normalized_value,  
+            type="azureblob",  
+            container=container,  
+            # Remove endpoint parameter and use connection_string with identity format
+            connection_string=f"ResourceId={storage_account_resource_id};"
+        )  
+  
+        data_source = ds_client.create_data_source_connection(data_source_connection)  
+        print(f"Data source '{normalized_value}' created successfully")
+		
+# Creating the Data Sources
+
+create_datasources_from_index_map(index_map, folder_path)
+
+#Defining the Create Index Function
+
+from azure.core.credentials import AzureKeyCredential  
+from azure.search.documents.indexes.models import SimpleField, SearchFieldDataType, SearchIndex, CorsOptions  
+from azure.search.documents.indexes import SearchIndexClient  
+from typing import List  
+    
+def create_index(name: str):  
+    # Initialize the SearchIndexClient with endpoint and key  
+    client = SearchIndexClient(  
+        endpoint=search_service_endpoint,  
+        credential=DefaultAzureCredential()  
+    )  
+  
+    # Define the index fields  
+    fields = [  
+        SimpleField(name="id", type=SearchFieldDataType.String, key=True, retrievable=True, stored=True),  
+        SimpleField(name="reference", type=SearchFieldDataType.String, filterable=True, retrievable=True, stored=True),  
+        SearchableField(name="content", type=SearchFieldDataType.String, retrievable=True, stored=True),  
+        SearchableField(name="client_account", type=SearchFieldDataType.String, filterable=True, retrievable=True, stored=True),  
+        SearchableField(name="client_industry", type=SearchFieldDataType.String, filterable=True, retrievable=True, stored=True),  
+        SearchableField(name="subsidiary_of", type=SearchFieldDataType.String, filterable=True, retrievable=True, stored=True),  
+    ]  
+
+    semantic_config = SemanticConfiguration(
+    name= "default", #"index-semantic-configuration",
+    prioritized_fields=SemanticPrioritizedFields(
+        title_field=SemanticField(field_name="client_account"),
+        keywords_fields=[
+            SemanticField(field_name="client_account"),
+            SemanticField(field_name="client_industry"),
+            SemanticField(field_name="subsidiary_of")
+        ],
+        content_fields=[SemanticField(field_name="content")]
+    )
+    )
+
+    semantic_search = SemanticSearch(configurations=[semantic_config])
+  
+    # Define CORS options  
+    cors_options = CorsOptions(allowed_origins=["*"], max_age_in_seconds=60)  
+  
+    # Define the Search Index  
+    index = SearchIndex(  
+        name=name,  
+        fields=fields,  
+        semantic_search=semantic_search,
+        cors_options=cors_options  
+    )  
+  
+    # Create the index using the client  
+    try:  
+        result = client.create_index(index)  
+        print(f"Index '{name}' created successfully.")  
+    except Exception as e:  
+        print(f"Error creating index '{name}': {e}")  
+		
+#Creating AI Search Indexes
+
+for i in index_map.keys():
+    create_index(i)
+	
+#Defining and Creating Azure AI Search Indexers
+
+from azure.identity import DefaultAzureCredential  
+from azure.search.documents.indexes import SearchIndexerClient, SearchIndexClient  
+from azure.search.documents.indexes.models import SearchIndexer, IndexingParameters   
+
+# Creating a copy of the index_map with underscores replaced with hyphens  
+new_index_map = {k: {v.replace('_', '-') for v in values} for k, values in index_map.items()}  
+  
+# Function to create an indexer  
+def create_indexer(name: str, data_source_name: str, index_name: str):  
+    client = SearchIndexerClient(  
+        endpoint=search_service_endpoint,  
+        credential=DefaultAzureCredential()  
+    )  
+  
+    indexing_parameters = IndexingParameters(  
+        configuration={  
+            "parsingMode": "json",  
+            "indexedDocumentFilenameExtensions": ".json"  
+        }  
+    )  
+  
+    indexer = SearchIndexer(  
+        name=name,  
+        data_source_name=data_source_name,  
+        target_index_name=index_name,  
+        parameters=indexing_parameters  
+    )  
+  
+    try:  
+        client.create_indexer(indexer)  
+        print(f"Indexer '{name}' created successfully.")  
+    except Exception as e:  
+        print(f"Error creating indexer '{name}': {e}")  
+
+# Iterate over the new_index_map and create indexers  
+for index_name, data_sources in new_index_map.items():  
+    for data_source in data_sources:  
+        indexer_name = f"{index_name}-{data_source}-indexers"  
+        create_indexer(indexer_name, data_source, index_name)  
+		
+		
+
+
